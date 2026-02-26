@@ -5,8 +5,8 @@
 #include <stdbool.h>
 
 // ==================== WiFi Configuration ====================
-#define WIFI_SSID       "demonoid"
-#define WIFI_PASSWORD   "lacasadepapel2019"
+#define WIFI_SSID       " "
+#define WIFI_PASSWORD   " "
 
 // ==================== Timing Configuration ====================
 #define FETCH_INTERVAL_MS       (15UL * 60UL * 1000UL) 
@@ -49,5 +49,6 @@
 // ==================== Global LoRa Function ====================
 // Implemented in main.cpp, used by json_parser.cpp
 void queue_lora_message(const char* message);
+
 
 #endif  
