@@ -27,8 +27,16 @@ CONFLICT - General conflict
 TERROR - Terror incident   
 
 🔮 Other Cool Sources You Could Add Later
-SourceURLEventsRSOE EDISedis.rsoe.huAll disasters worldwideLiveUAMapliveuamap.comConflicts 
-(no free API)Flightradar24fr24.comPlane incidents (paid API)WHO Diseasewho.intDisease outbreaks
+SourceURLEventsRSOE EDISedis.rsoe.hu
+All disasters worldwide
+Live
+UAMapliveuamap.com
+Conflicts 
+ 
+Flightradar24fr24.com
+Plane incidents
+)WHO Diseasewho.int
+Disease outbreaks
 
 ![photo_2026-02-25_16-25-18 (2)](https://github.com/user-attachments/assets/2536bfad-33c0-4cdc-87f8-5cb56b456f98)
 ![photo_2026-02-25_16-23-12](https://github.com/user-attachments/assets/6fa6cb43-5288-4170-adb3-a02a5424922b)
