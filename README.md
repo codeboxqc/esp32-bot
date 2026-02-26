@@ -1,27 +1,30 @@
-🌍 All Event Sources
-SourceEventsStatusUSGSEarthquakes M4.5+
-✅ WorkingGDACSCyclones, Floods, Volcanoes, Droughts, Wildfires
-✅ WorkingNASA EONETWildfires, Storms, Volcanoes, Icebergs
-✅ WorkingNOAA SpaceSolar Flares, Geomagnetic Storms, CME, Radio Blackouts
+🌍 All Event Sources  
+SourceEventsStatusUSGSEarthquakes M4.5+  
+✅ WorkingGDACSCyclones, Floods, Volcanoes, Droughts, Wildfires   
+✅ WorkingNASA EONETWildfires, Storms, Volcanoes, Icebergs   
+
+✅ WorkingNOAA SpaceSolar Flares, Geomagnetic Storms, CME, Radio Blackouts  
+
 ✅ NEW
 ☀️ Space Weather Events
 DisplayMeaningDangerFLARESolar X-ray flare
 🔴 Can disrupt radioGEOMAGGeomagnetic storm (G1-G5)
 🔴 Power grid issuesCMECoronal Mass Ejection
-🔴 Satellites at riskRADIORadio blackout
-🟠 HF radio affectedSOLARGeneral solar activity
-🟢 Monitoring
-⚠️ About DEFCON / War Monitoring
-Unfortunately, there's no public API for DEFCON levels - 
-it's classified military information. However, 
-I added the event types so if you find a source later, you can use:
+🔴 Satellites at riskRADIORadio blackout  
+🟠 HF radio affectedSOLARGeneral solar activity  
+🟢 Monitoring  
 
-WAR - Armed conflict
-DEFCON - Defense condition
-NUKE - Nuclear event
-MILITARY - Military activity
-CONFLICT - General conflict
-TERROR - Terror incident
+⚠️ About DEFCON / War Monitoring  
+Unfortunately, there's no public API for DEFCON levels -   
+it's classified military information. However,   
+I added the event types so if you find a source later, you can use:  
+
+WAR - Armed conflict  
+DEFCON - Defense condition  
+NUKE - Nuclear event  
+MILITARY - Military activity  
+CONFLICT - General conflict  
+TERROR - Terror incident   
 
 🔮 Other Cool Sources You Could Add Later
 SourceURLEventsRSOE EDISedis.rsoe.huAll disasters worldwideLiveUAMapliveuamap.comConflicts 
