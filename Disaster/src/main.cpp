@@ -14,11 +14,11 @@
 #include <esp_task_wdt.h>    // Watchdog
 #include "soc/rtc_cntl_reg.h" // Brown-out detector
 
-extern void display_mesh_chat(const char* message);
+// display_mesh_chat is defined below in DISPLAY FUNCTIONS section
 
 // ==================== WIFI ====================
-const char* WIFI_SSID     = "demono ";
-const char* WIFI_PASSWORD = "test";
+const char* WIFI_SSID     = "demon";
+const char* WIFI_PASSWORD = "lacasa";
 
 // ==================== TIMING ====================
 #define FETCH_INTERVAL_MS   (5UL * 60UL * 1000UL)
@@ -49,10 +49,19 @@ static bool uart_healthy = true;
 
 // ==================== API ENDPOINTS ====================
 const char* USGS_URL = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_day.geojson";
-const char* GDACS_URL = "https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH?eventlist=EQ,TC,FL,VO,DR,WF&alertlevel=Green;Orange;Red&limit=10";
+// EMSC - European Mediterranean Seismological Centre
+const char* EMSC_URL = "https://www.seismicportal.eu/fdsnws/event/1/query?limit=10&minmag=4.5&format=json";
+// NASA EONET - Natural events (fires, storms, volcanoes)
 const char* EONET_URL = "https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=10";
-const char* NOAA_SPACE_URL = "https://services.swpc.noaa.gov/products/alerts.json";  // Solar flares, geomagnetic storms
-const char* NUCLEAR_URL = "https://api.nuclearsecrecy.com/status.json";  // Unofficial - may not work
+// NOAA Space Weather - solar activity
+const char* NOAA_SPACE_URL = "https://services.swpc.noaa.gov/products/noaa-scales.json";
+// NWS Active Alerts - Severe weather (US only) - limited to reduce size
+const char* NWS_ALERTS_URL = "https://api.weather.gov/alerts/active?status=actual&severity=Extreme&limit=5";
+
+// ==================== LORA TIMING ====================
+#define LORA_SEND_INTERVAL_MS   (60UL * 60UL * 1000UL)  // 1 hour between LoRa sends
+static unsigned long lastLoraSendTime = 0;
+static bool loraHourlyPending = false;  // Flag to indicate we have events to send
 
 // ==================== EEPROM PROTECTION ====================
 #define EEPROM_SIZE    512
@@ -108,15 +117,21 @@ const char* getEventTypeName(const char* code) {
     if (strcmp(code, "volcano") == 0) return "VOLCANO";
     if (strcmp(code, "landslide") == 0) return "SLIDE";
     
-    // Weather
+    // Severe Weather (NWS)
+    if (strcmp(code, "TORNADO") == 0) return "TORNADO";
+    if (strcmp(code, "TSUNAMI") == 0) return "TSUNAMI";
     if (strcmp(code, "TC") == 0) return "CYCLONE";
     if (strcmp(code, "FL") == 0) return "FLOOD";
     if (strcmp(code, "flood") == 0) return "FLOOD";
     if (strcmp(code, "DR") == 0) return "DROUGHT";
+    if (strcmp(code, "STORM") == 0) return "STORM";
     if (strcmp(code, "storm") == 0) return "STORM";
     if (strcmp(code, "severeStorm") == 0) return "STORM";
-    if (strcmp(code, "iceberg") == 0) return "ICEBERG";
+    if (strcmp(code, "SNOW") == 0) return "BLIZZARD";
     if (strcmp(code, "snow") == 0) return "SNOW";
+    if (strcmp(code, "iceberg") == 0) return "ICEBERG";
+    if (strcmp(code, "WEATHER") == 0) return "WEATHER";
+    if (strcmp(code, "EXTREME") == 0) return "EXTREME";
     
     // Fire
     if (strcmp(code, "WF") == 0) return "WILDFIRE";
@@ -128,16 +143,16 @@ const char* getEventTypeName(const char* code) {
     if (strcmp(code, "GEOMAG") == 0) return "GEOMAG";
     if (strcmp(code, "RADIO") == 0) return "RADIO";
     if (strcmp(code, "FLARE") == 0) return "FLARE";
-    if (strcmp(code, "CME") == 0) return "CME";  // Coronal Mass Ejection
+    if (strcmp(code, "CME") == 0) return "CME";
     
-    // Military / Conflict
+    // Military / Conflict (kept for future use)
     if (strcmp(code, "WAR") == 0) return "WAR";
     if (strcmp(code, "DEFCON") == 0) return "DEFCON";
     if (strcmp(code, "NUKE") == 0) return "NUKE";
     if (strcmp(code, "MILITARY") == 0) return "MILITARY";
     if (strcmp(code, "CONFLICT") == 0) return "CONFLICT";
     if (strcmp(code, "TERROR") == 0) return "TERROR";
-    if (strcmp(code, "PROTEST") == 0) return "PROTEST";
+    if (strcmp(code, "EMERGENCY") == 0) return "EMERGENCY";
     
     // Health
     if (strcmp(code, "EPIDEMIC") == 0) return "EPIDEMIC";
@@ -167,8 +182,8 @@ int queueHead  = 0;
 int queueTail  = 0;
 int queueCount = 0;
 
-// ==================== LORA QUEUE ====================
-#define LORA_QUEUE_SIZE 5
+// ==================== LORA QUEUE (HOURLY) ====================
+#define LORA_QUEUE_SIZE 20  // Larger queue for hourly batch
 char loraQueue[LORA_QUEUE_SIZE][80];
 int  loraQueueCount = 0;
 
@@ -188,10 +203,13 @@ void reset_uart_health(void);
 void check_uart_health(void);
 void flush_uart_garbage(void);
 int fetchUSGS(void);
-int fetchGDACS(void);
+int fetchEMSC(void);
 int fetchEONET(void);
 int fetchSpaceWeather(void);
+int fetchNWSAlerts(void);
 int fetchAllDisasters(void);
+void checkLoraHourlySend(void);
+void sendLoraQueueNow(void);
 
 // ==================== GLOBALS ====================
 unsigned long lastFetchTime     = 0;
@@ -517,18 +535,48 @@ void queueLoraMessage(const char* message) {
 }
 
 void flushLoraQueue() {
-    if (loraQueueCount == 0) return;
+    // Just mark that we have pending messages - actual send happens hourly
+    if (loraQueueCount > 0) {
+        loraHourlyPending = true;
+        Serial.printf("[LORA] %d messages queued for hourly send\n", loraQueueCount);
+    }
+}
+
+void sendLoraQueueNow() {
+    // Force send all queued messages NOW (called by hourly timer or manual command)
+    if (loraQueueCount == 0) {
+        Serial.println("[LORA] No messages to send");
+        return;
+    }
     
-    Serial.printf("[MESH] Flushing %d messages\n", loraQueueCount);
+    Serial.printf("[LORA] 📡 Sending %d messages to mesh...\n", loraQueueCount);
     delay(200);
     
+    // Send summary header first
+    char header[80];
+    snprintf(header, sizeof(header), "=== ALERT DIGEST (%d events) ===", loraQueueCount);
+    sendToHeltec(header);
+    delay(500);
+    
+    // Send each message
     for (int i = 0; i < loraQueueCount; i++) {
-        feed_watchdog();  // Keep watchdog happy during long operations
+        feed_watchdog();
         sendToHeltec(loraQueue[i]);
-        delay(500);
+        delay(600);  // Slightly longer delay for reliability
     }
     
     loraQueueCount = 0;
+    loraHourlyPending = false;
+    lastLoraSendTime = millis();
+    
+    Serial.println("[LORA] ✅ Hourly digest sent");
+}
+
+void checkLoraHourlySend() {
+    // Check if it's time for hourly LoRa send
+    if (loraHourlyPending && (millis() - lastLoraSendTime >= LORA_SEND_INTERVAL_MS)) {
+        sendLoraQueueNow();
+    }
 }
 
 // ==================== BUTTONS ====================
@@ -690,6 +738,31 @@ void showAlert(DisasterEvent* evt) {
     tft.print(evt->location);
 }
 
+void display_mesh_chat(const char* message) {
+    tft.fillScreen(TFT_BLACK);
+    
+    // Blue border for chat messages
+    tft.drawRect(0, 0, 240, 135, TFT_BLUE);
+    tft.drawRect(1, 1, 238, 133, TFT_BLUE);
+    
+    // Header
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("MESH CHAT", 120, 10, 4);
+    
+    // Divider line
+    tft.drawLine(10, 35, 230, 35, TFT_BLUE);
+    
+    // Message text
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.setCursor(10, 45);
+    tft.setTextFont(2);
+    tft.setTextSize(2);
+    tft.setTextWrap(true, true);
+    tft.print(message);
+}
+
 // ==================== EVENT TRACKING ====================
 
 bool isEventSeen(const char* id) {
@@ -847,35 +920,36 @@ int fetchUSGS() {
 
 // ==================== FETCH GDACS (Multi-hazard) ====================
 
-int fetchGDACS() {
+int fetchEMSC() {
     if (!is_memory_safe()) {
-        Serial.println("[GDACS] ❌ Skipping - low memory");
+        Serial.println("[EMSC] ❌ Skipping - low memory");
         return 0;
     }
     
-    Serial.println("[GDACS] Fetching disasters...");
+    Serial.println("[EMSC] Fetching Euro earthquakes...");
     feed_watchdog();
     
     WiFiClientSecure client;
     client.setInsecure();
     HTTPClient http;
-    http.begin(client, GDACS_URL);
+    http.begin(client, EMSC_URL);
     http.setTimeout(15000);
     http.addHeader("Accept", "application/json");
+    http.addHeader("User-Agent", "DisasterAlert/2.3 ESP32");
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     
     int httpCode = http.GET();
     int newEvents = 0;
-    Serial.printf("[GDACS] HTTP %d\n", httpCode);
+    Serial.printf("[EMSC] HTTP %d\n", httpCode);
     
     feed_watchdog();
     
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
-        Serial.printf("[GDACS] Received %d bytes\n", payload.length());
+        Serial.printf("[EMSC] Received %d bytes\n", payload.length());
         
         if (payload.length() > MAX_JSON_SIZE) {
-            Serial.println("[GDACS] ❌ Payload too large");
+            Serial.println("[EMSC] ❌ Payload too large");
             http.end();
             return 0;
         }
@@ -887,10 +961,11 @@ int fetchGDACS() {
         payload = String();
         
         if (error) {
-            Serial.printf("[GDACS] JSON error: %s\n", error.c_str());
+            Serial.printf("[EMSC] JSON error: %s\n", error.c_str());
         } else {
+            // EMSC uses "features" array like GeoJSON
             JsonArray features = doc["features"];
-            Serial.printf("[GDACS] Parsed %d events\n", features.size());
+            Serial.printf("[EMSC] Parsed %d quakes\n", features.size());
             
             int count = 0;
             for (JsonObject feature : features) {
@@ -902,40 +977,39 @@ int fetchGDACS() {
                 
                 JsonObject props = feature["properties"];
                 
-                int eventId = props["eventid"] | 0;
-                snprintf(evt.id, sizeof(evt.id), "gdacs_%d", eventId);
-                
-                const char* eventType = props["eventtype"] | "UNK";
-                strncpy(evt.type, eventType, sizeof(evt.type) - 1);
-                
-                const char* name = props["name"] | "Unknown";
-                const char* country = props["country"] | "";
-                if (strlen(country) > 0) {
-                    snprintf(evt.location, sizeof(evt.location), "%s, %s", name, country);
+                // Get unique ID
+                const char* unid = props["unid"] | "";
+                if (strlen(unid) > 0) {
+                    snprintf(evt.id, sizeof(evt.id), "emsc_%s", unid);
                 } else {
-                    strncpy(evt.location, name, sizeof(evt.location) - 1);
+                    snprintf(evt.id, sizeof(evt.id), "emsc_%ld", (long)props["time"]);
                 }
                 
-                const char* alertLevel = props["alertlevel"] | "Green";
-                if (strcmp(alertLevel, "Red") == 0) evt.alertLevel = 2;
-                else if (strcmp(alertLevel, "Orange") == 0) evt.alertLevel = 1;
-                else evt.alertLevel = 0;
+                strcpy(evt.type, "EQ");
                 
-                // Get severity/magnitude if available
-                JsonObject severity = props["severitydata"];
-                evt.magnitude = severity["severity"] | 0.0f;
+                // Get magnitude
+                evt.magnitude = props["mag"] | 0.0f;
+                
+                // Get location (flynn_region is the readable location name)
+                const char* region = props["flynn_region"] | "Unknown";
+                strncpy(evt.location, region, sizeof(evt.location) - 1);
+                
+                // Set alert level based on magnitude
+                if (evt.magnitude >= 7.0) evt.alertLevel = 2;
+                else if (evt.magnitude >= 5.5) evt.alertLevel = 1;
+                else evt.alertLevel = 0;
                 
                 if (addToQueue(&evt)) newEvents++;
             }
         }
     } else {
-        Serial.printf("[GDACS] HTTP error: %d\n", httpCode);
+        Serial.printf("[EMSC] HTTP error: %d\n", httpCode);
     }
     
     http.end();
     feed_watchdog();
     
-    Serial.printf("[GDACS] %d new events\n", newEvents);
+    Serial.printf("[EMSC] %d new quakes\n", newEvents);
     return newEvents;
 }
 
@@ -955,6 +1029,7 @@ int fetchEONET() {
     HTTPClient http;
     http.begin(client, EONET_URL);
     http.setTimeout(15000);
+    http.addHeader("User-Agent", "DisasterAlert/2.3 ESP32");
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     
     int httpCode = http.GET();
@@ -1056,8 +1131,8 @@ int fetchSpaceWeather() {
         String payload = http.getString();
         Serial.printf("[SPACE] Received %d bytes\n", payload.length());
         
-        if (payload.length() > MAX_JSON_SIZE) {
-            Serial.println("[SPACE] ❌ Payload too large");
+        if (payload.length() == 0 || payload.length() > MAX_JSON_SIZE) {
+            Serial.println("[SPACE] ❌ Invalid payload size");
             http.end();
             return 0;
         }
@@ -1071,62 +1146,62 @@ int fetchSpaceWeather() {
         if (error) {
             Serial.printf("[SPACE] JSON error: %s\n", error.c_str());
         } else {
-            JsonArray alerts = doc.as<JsonArray>();
-            Serial.printf("[SPACE] Parsed %d alerts\n", alerts.size());
+            // noaa-scales.json format: {"0": {"DateStamp": "...", "R": {"Scale": 0, ...}, "S": {...}, "G": {...}}}
+            // R = Radio Blackout, S = Solar Radiation, G = Geomagnetic Storm
+            // Scale: 0=none, 1=minor, 2=moderate, 3=strong, 4=severe, 5=extreme
             
-            int count = 0;
-            for (JsonObject alert : alerts) {
-                if (++count > 3) break;  // Limit space weather alerts
-                feed_watchdog();
+            // Get current day "0" data
+            JsonObject day0 = doc["0"];
+            if (!day0.isNull()) {
+                const char* dateStamp = day0["DateStamp"] | "now";
                 
-                DisasterEvent evt;
-                memset(&evt, 0, sizeof(evt));
-                
-                // Get product code (ALTK30 = geomag, ALTTP2 = solar radiation, etc.)
-                const char* productId = alert["product_id"] | "unknown";
-                snprintf(evt.id, sizeof(evt.id), "noaa_%s", productId);
-                
-                // Determine event type from message
-                const char* message = alert["message"] | "";
-                
-                if (strstr(message, "Geomagnetic") != NULL || strstr(message, "geomagnetic") != NULL) {
+                // Check Geomagnetic Storm (G scale)
+                JsonObject gScale = day0["G"];
+                int gLevel = gScale["Scale"] | 0;
+                if (gLevel >= 1) {
+                    DisasterEvent evt;
+                    memset(&evt, 0, sizeof(evt));
+                    snprintf(evt.id, sizeof(evt.id), "noaa_G_%s", dateStamp);
                     strcpy(evt.type, "GEOMAG");
-                } else if (strstr(message, "Solar Flare") != NULL || strstr(message, "X-ray") != NULL) {
-                    strcpy(evt.type, "FLARE");
-                } else if (strstr(message, "CME") != NULL || strstr(message, "Coronal") != NULL) {
-                    strcpy(evt.type, "CME");
-                } else if (strstr(message, "Radio") != NULL || strstr(message, "Blackout") != NULL) {
-                    strcpy(evt.type, "RADIO");
-                } else {
+                    snprintf(evt.location, sizeof(evt.location), "Geomagnetic Storm G%d", gLevel);
+                    evt.magnitude = gLevel;
+                    evt.alertLevel = (gLevel >= 4) ? 2 : (gLevel >= 2) ? 1 : 0;
+                    if (addToQueue(&evt)) newEvents++;
+                }
+                
+                // Check Solar Radiation (S scale)
+                JsonObject sScale = day0["S"];
+                int sLevel = sScale["Scale"] | 0;
+                if (sLevel >= 1) {
+                    DisasterEvent evt;
+                    memset(&evt, 0, sizeof(evt));
+                    snprintf(evt.id, sizeof(evt.id), "noaa_S_%s", dateStamp);
                     strcpy(evt.type, "SOLAR");
+                    snprintf(evt.location, sizeof(evt.location), "Solar Radiation S%d", sLevel);
+                    evt.magnitude = sLevel;
+                    evt.alertLevel = (sLevel >= 4) ? 2 : (sLevel >= 2) ? 1 : 0;
+                    if (addToQueue(&evt)) newEvents++;
                 }
                 
-                // Extract a short description
-                // NOAA messages are long, grab first ~50 chars
-                strncpy(evt.location, message, 50);
-                evt.location[50] = '\0';
-                // Clean up - remove newlines
-                for (int i = 0; evt.location[i]; i++) {
-                    if (evt.location[i] == '\n' || evt.location[i] == '\r') {
-                        evt.location[i] = ' ';
-                    }
+                // Check Radio Blackout (R scale)
+                JsonObject rScale = day0["R"];
+                int rLevel = rScale["Scale"] | 0;
+                if (rLevel >= 1) {
+                    DisasterEvent evt;
+                    memset(&evt, 0, sizeof(evt));
+                    snprintf(evt.id, sizeof(evt.id), "noaa_R_%s", dateStamp);
+                    strcpy(evt.type, "RADIO");
+                    snprintf(evt.location, sizeof(evt.location), "Radio Blackout R%d", rLevel);
+                    evt.magnitude = rLevel;
+                    evt.alertLevel = (rLevel >= 4) ? 2 : (rLevel >= 2) ? 1 : 0;
+                    if (addToQueue(&evt)) newEvents++;
                 }
                 
-                // Check for severity keywords
-                if (strstr(message, "Extreme") != NULL || strstr(message, "G5") != NULL || 
-                    strstr(message, "X") != NULL) {
-                    evt.alertLevel = 2;  // Red
-                    evt.magnitude = 5.0;
-                } else if (strstr(message, "Severe") != NULL || strstr(message, "G4") != NULL ||
-                           strstr(message, "Strong") != NULL || strstr(message, "G3") != NULL) {
-                    evt.alertLevel = 1;  // Orange
-                    evt.magnitude = 3.0;
-                } else {
-                    evt.alertLevel = 0;  // Green
-                    evt.magnitude = 1.0;
+                if (newEvents == 0) {
+                    Serial.println("[SPACE] No active space weather events");
                 }
-                
-                if (addToQueue(&evt)) newEvents++;
+            } else {
+                Serial.println("[SPACE] No current data in response");
             }
         }
     } else {
@@ -1140,20 +1215,147 @@ int fetchSpaceWeather() {
     return newEvents;
 }
 
+// ==================== FETCH CONFLICTS/WAR (GDELT) ====================
+
+int fetchNWSAlerts() {
+    if (!is_memory_safe()) {
+        Serial.println("[NWS] ❌ Skipping - low memory");
+        return 0;
+    }
+    
+    Serial.println("[NWS] Fetching severe weather...");
+    feed_watchdog();
+    
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    http.begin(client, NWS_ALERTS_URL);
+    http.setTimeout(15000);
+    http.addHeader("User-Agent", "(DisasterAlert/2.4, github.com/disaster-alert)");
+    http.addHeader("Accept", "application/geo+json");
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    
+    int httpCode = http.GET();
+    int newEvents = 0;
+    Serial.printf("[NWS] HTTP %d\n", httpCode);
+    
+    feed_watchdog();
+    
+    if (httpCode == HTTP_CODE_OK) {
+        int contentLen = http.getSize();
+        Serial.printf("[NWS] Content size: %d bytes\n", contentLen);
+        
+        // Skip if too large (NWS can return huge responses)
+        if (contentLen > 30000 || contentLen == -1) {
+            Serial.println("[NWS] ⚠️ Response too large, skipping");
+            http.end();
+            return 0;
+        }
+        
+        String payload = http.getString();
+        
+        if (payload.length() == 0) {
+            Serial.println("[NWS] Empty response");
+            http.end();
+            return 0;
+        }
+        
+        feed_watchdog();
+        
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, payload);
+        payload = String();  // Free memory
+        
+        if (error) {
+            Serial.printf("[NWS] JSON error: %s\n", error.c_str());
+        } else {
+            JsonArray features = doc["features"];
+            int alertCount = features.size();
+            Serial.printf("[NWS] Found %d extreme alerts\n", alertCount);
+            
+            if (alertCount == 0) {
+                Serial.println("[NWS] No extreme weather alerts active");
+            }
+            
+            int count = 0;
+            for (JsonObject feature : features) {
+                if (++count > 3) break;  // Limit to 3 alerts
+                feed_watchdog();
+                
+                DisasterEvent evt;
+                memset(&evt, 0, sizeof(evt));
+                
+                JsonObject props = feature["properties"];
+                
+                // Get ID (use first 20 chars)
+                const char* id = props["id"] | "";
+                snprintf(evt.id, sizeof(evt.id), "nws_%.16s", id + (strlen(id) > 16 ? strlen(id) - 16 : 0));
+                
+                // Get event type
+                const char* eventName = props["event"] | "Alert";
+                
+                // Map to our types
+                if (strstr(eventName, "Tornado") != NULL) {
+                    strcpy(evt.type, "TORNADO");
+                    evt.alertLevel = 2;
+                } else if (strstr(eventName, "Hurricane") != NULL) {
+                    strcpy(evt.type, "TC");
+                    evt.alertLevel = 2;
+                } else if (strstr(eventName, "Tsunami") != NULL) {
+                    strcpy(evt.type, "TSUNAMI");
+                    evt.alertLevel = 2;
+                } else if (strstr(eventName, "Flash Flood") != NULL) {
+                    strcpy(evt.type, "FL");
+                    evt.alertLevel = 2;
+                } else if (strstr(eventName, "Fire") != NULL) {
+                    strcpy(evt.type, "WF");
+                    evt.alertLevel = 2;
+                } else {
+                    strcpy(evt.type, "EXTREME");
+                    evt.alertLevel = 2;
+                }
+                
+                // Get short headline
+                const char* headline = props["headline"] | eventName;
+                strncpy(evt.location, headline, sizeof(evt.location) - 1);
+                // Truncate at 60 chars for display
+                if (strlen(evt.location) > 60) {
+                    evt.location[57] = '.';
+                    evt.location[58] = '.';
+                    evt.location[59] = '.';
+                    evt.location[60] = '\0';
+                }
+                
+                evt.magnitude = 0;
+                
+                if (addToQueue(&evt)) newEvents++;
+            }
+        }
+    } else {
+        Serial.printf("[NWS] HTTP error: %d\n", httpCode);
+    }
+    
+    http.end();
+    feed_watchdog();
+    
+    Serial.printf("[NWS] %d new alerts\n", newEvents);
+    return newEvents;
+}
+
 // ==================== FETCH ALL SOURCES ====================
 
 int fetchAllDisasters() {
-    loraQueueCount = 0;  // Clear LoRa queue before fetching
+    // Don't clear LoRa queue - we accumulate for hourly send
     
     int total = 0;
     
-    // Earthquakes
+    // Earthquakes (US)
     total += fetchUSGS();
     delay(1000);
     feed_watchdog();
     
-    // Multi-hazard (cyclones, floods, volcanoes, etc.)
-    total += fetchGDACS();
+    // Earthquakes (Europe/World)
+    total += fetchEMSC();
     delay(1000);
     feed_watchdog();
     
@@ -1164,8 +1366,13 @@ int fetchAllDisasters() {
     
     // Space weather (solar flares, geomagnetic storms)
     total += fetchSpaceWeather();
+    delay(1000);
+    feed_watchdog();
     
-    // Flush all LoRa messages at once
+    // NWS Severe Weather Alerts (Tornadoes, Hurricanes, etc)
+    total += fetchNWSAlerts();
+    
+    // Queue for hourly LoRa send (don't send immediately)
     flushLoraQueue();
     
     Serial.printf("[FETCH] Total: %d new events\n", total);
@@ -1251,12 +1458,105 @@ void monitor_mesh_chat() {
     Serial.print("[MESH RX]: ");
     Serial.println(incomingChat);
     
-    display_mesh_chat(incomingChat.c_str());
+    // ==================== CHAT BOT COMMANDS ====================
+    // Check if message contains bot commands (case insensitive)
+    String msgLower = incomingChat;
+    msgLower.toLowerCase();
     
-    // Shorter delay with watchdog feeding
-    for (int i = 0; i < 50; i++) {
-        delay(100);
-        feed_watchdog();
+    bool isCommand = false;
+    
+    // Bot name trigger - "e844" or "bot" or "alert"
+    if (msgLower.indexOf("e844") >= 0 || msgLower.indexOf("bot") >= 0 || 
+        msgLower.indexOf("alert") >= 0 || msgLower.indexOf("disaster") >= 0) {
+        
+        isCommand = true;
+        
+        // Check for specific commands
+        if (msgLower.indexOf("status") >= 0 || msgLower.indexOf("stat") >= 0) {
+            // Status command
+            char reply[120];
+            snprintf(reply, sizeof(reply), 
+                "📊 STATUS: WiFi:%s | Mem:%uKB | Queue:%d | Seen:%d events",
+                wifiConnected ? "OK" : "DOWN",
+                ESP.getFreeHeap() / 1024,
+                loraQueueCount,
+                seenCount);
+            sendToHeltec(reply);
+            
+        } else if (msgLower.indexOf("quake") >= 0 || msgLower.indexOf("eq") >= 0) {
+            // Last earthquake info
+            sendToHeltec("🌍 Recent quakes from USGS & EMSC checked every 5min");
+            if (queueCount > 0) {
+                char reply[80];
+                snprintf(reply, sizeof(reply), "📋 %d alerts in display queue", queueCount);
+                sendToHeltec(reply);
+            }
+            
+        } else if (msgLower.indexOf("help") >= 0 || msgLower.indexOf("?") >= 0) {
+            // Help command
+            delay(300);
+            sendToHeltec("🤖 E844 BOT COMMANDS:");
+            delay(500);
+            sendToHeltec("• e844 status - System status");
+            delay(500);
+            sendToHeltec("• e844 quake - Earthquake info");
+            delay(500);
+            sendToHeltec("• e844 weather - Space weather");
+            delay(500);
+            sendToHeltec("• e844 ping - Test connection");
+            delay(500);
+            sendToHeltec("• e844 send - Force send alerts");
+            
+        } else if (msgLower.indexOf("weather") >= 0 || msgLower.indexOf("solar") >= 0 || 
+                   msgLower.indexOf("space") >= 0) {
+            // Space weather
+            sendToHeltec("☀️ Space weather from NOAA SWPC");
+            sendToHeltec("G=Geomag S=Solar R=Radio (1-5 scale)");
+            
+        } else if (msgLower.indexOf("ping") >= 0) {
+            // Ping response
+            char reply[60];
+            snprintf(reply, sizeof(reply), "🏓 PONG! Uptime: %lu min", millis() / 60000);
+            sendToHeltec(reply);
+            
+        } else if (msgLower.indexOf("send") >= 0 || msgLower.indexOf("flush") >= 0) {
+            // Force send LoRa queue
+            if (loraQueueCount > 0) {
+                sendToHeltec("📡 Sending queued alerts NOW...");
+                delay(500);
+                sendLoraQueueNow();
+            } else {
+                sendToHeltec("📭 No alerts queued");
+            }
+            
+        } else if (msgLower.indexOf("hi") >= 0 || msgLower.indexOf("hello") >= 0) {
+            // Greeting
+            sendToHeltec("👋 Hello! I'm E844 DisasterAlert Bot");
+            delay(500);
+            sendToHeltec("Type 'e844 help' for commands");
+            
+        } else {
+            // Unknown command - show brief help
+            sendToHeltec("🤖 E844 here! Try: e844 help");
+        }
+    }
+    
+    // Only show on display if NOT a bot command (or show briefly)
+    if (!isCommand) {
+        display_mesh_chat(incomingChat.c_str());
+        
+        // Shorter delay with watchdog feeding
+        for (int i = 0; i < 50; i++) {
+            delay(100);
+            feed_watchdog();
+        }
+    } else {
+        // Brief display for commands
+        display_mesh_chat(incomingChat.c_str());
+        for (int i = 0; i < 20; i++) {
+            delay(100);
+            feed_watchdog();
+        }
     }
     
     lastDisplayChange = 0;
@@ -1286,8 +1586,8 @@ void setup() {
     ledcWrite(0, 255);
     
     Serial.println("\n=================================");
-    Serial.println("  Disaster Alert v2.3 PROTECTED");
-    Serial.println("  EEPROM wear + Memory safety");
+    Serial.println("  E844 Disaster Alert v2.4");
+    Serial.println("  + Chat Bot + Hourly LoRa");
     Serial.println("=================================\n");
     
     // *** INIT WATCHDOG ***
@@ -1303,7 +1603,9 @@ void setup() {
     
     feed_watchdog();
     
-    sendToHeltec("DisasterAlert v2.3 online");
+    sendToHeltec("E844 DisasterAlert v2.4 online");
+    delay(500);
+    sendToHeltec("Type 'e844 help' for commands");
     
     Serial.printf("[WIFI] Connecting to %s\n", WIFI_SSID);
     WiFi.mode(WIFI_STA);
@@ -1377,6 +1679,10 @@ void loop() {
             Serial.println("[CMD] Test LoRa");
             sendToHeltec("TEST DisasterAlert");
         }
+        if (cmd == 'L' || cmd == 'l') {
+            Serial.println("[CMD] Force LoRa send NOW");
+            sendLoraQueueNow();
+        }
         if (cmd == 'M' || cmd == 'm') {
             Serial.printf("[CMD] Memory: %u free, %u min\n", 
                           ESP.getFreeHeap(), ESP.getMinFreeHeap());
@@ -1389,10 +1695,17 @@ void loop() {
             reset_uart_health();
             flush_uart_garbage();
         }
+        if (cmd == 'Q' || cmd == 'q') {
+            Serial.printf("[CMD] LoRa queue: %d messages pending\n", loraQueueCount);
+            unsigned long nextSend = (lastLoraSendTime + LORA_SEND_INTERVAL_MS - millis()) / 60000;
+            Serial.printf("[CMD] Next hourly send in: %lu minutes\n", nextSend);
+        }
         if (cmd == 'H' || cmd == 'h' || cmd == '?') {
             Serial.println("\n=== COMMANDS ===");
             Serial.println("C = Clear EEPROM & refetch");
             Serial.println("T = Test LoRa TX");
+            Serial.println("L = Force send LoRa queue NOW");
+            Serial.println("Q = Show LoRa queue status");
             Serial.println("M = Memory status");
             Serial.println("E = EEPROM write count");
             Serial.println("U = Reset UART health");
@@ -1402,6 +1715,9 @@ void loop() {
     
     // Monitor mesh chat
     monitor_mesh_chat();
+    
+    // Check if time to send hourly LoRa digest
+    checkLoraHourlySend();
     
     // Monitor WiFi
     if (wifiConnected && WiFi.status() != WL_CONNECTED) {
@@ -1440,5 +1756,4 @@ void loop() {
             lastDisplayChange = now;
         }
     }
-
 }
