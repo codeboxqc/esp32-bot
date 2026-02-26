@@ -17,8 +17,8 @@
 extern void display_mesh_chat(const char* message);
 
 // ==================== WIFI ====================
-const char* WIFI_SSID     = "demonoid";
-const char* WIFI_PASSWORD = "lacasadepapel2019";
+const char* WIFI_SSID     = "demono ";
+const char* WIFI_PASSWORD = "test";
 
 // ==================== TIMING ====================
 #define FETCH_INTERVAL_MS   (5UL * 60UL * 1000UL)
@@ -1440,4 +1440,5 @@ void loop() {
             lastDisplayChange = now;
         }
     }
+
 }
